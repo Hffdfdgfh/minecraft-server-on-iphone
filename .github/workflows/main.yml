@@ -1,0 +1,83 @@
+name: Build IPA (unsigned)
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write   # needed only for the release step on tags
+
+env:
+  PROJECT: McServer.xcodeproj
+  SCHEME: McServer
+  APP_NAME: McServer
+
+jobs:
+  build:
+    runs-on: macos-26          # app targets iOS 26 -> needs Xcode 26
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Downgrade project format for Xcode 26
+        # project was saved by Xcode 27 (objectVersion 110); Xcode 26.x reads up to 77.
+        # Only changes the CI checkout, not your repo.
+        run: |
+          PBX="$PROJECT/project.pbxproj"
+          grep -n "objectVersion" "$PBX"
+          sed -i '' -E 's/objectVersion = [0-9]+;/objectVersion = 77;/' "$PBX"
+          grep -n "objectVersion" "$PBX"
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          xcodebuild -list -project "$PROJECT"
+
+      - name: Build (no code signing)
+        run: |
+          set -o pipefail
+          xcodebuild build \
+            -project "$PROJECT" \
+            -scheme "$SCHEME" \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="" \
+            | tee build.log | (xcpretty 2>/dev/null || cat)
+
+      - name: Package .ipa
+        run: |
+          APP_PATH="build/Build/Products/Release-iphoneos/${APP_NAME}.app"
+          test -d "$APP_PATH" || { echo "app not found at $APP_PATH"; exit 1; }
+          rm -rf Payload && mkdir Payload
+          cp -R "$APP_PATH" Payload/
+          zip -qry "${APP_NAME}.ipa" Payload
+          ls -lh "${APP_NAME}.ipa"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.APP_NAME }}-ipa
+          path: ${{ env.APP_NAME }}.ipa
+          if-no-files-found: error
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+
+      - name: Attach to GitHub Release (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.APP_NAME }}.ipa
